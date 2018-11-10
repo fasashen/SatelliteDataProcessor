@@ -1,14 +1,15 @@
-import struct
 import time
-import os
-import pty
 
 from collections import deque
 from multiprocessing import Process
 
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 import matplotlib.pyplot as plt
 import numpy as np
 import serial
+import hashlib
+import json
 
 class Satellite:
     def __init__(self,
@@ -23,7 +24,9 @@ class Satellite:
                  first_byte = b'A',
                  plotting=True,
                  plotsize=30,
-                 emulated_serial=False):
+                 hyperledge_add='http://10.1.49.50:3000/api/AddSatData',
+                 hyperledge_get='http://10.1.49.50:3000/queries/getAssetsByTimeAndSatID',
+                 satID=1):
 
         self.serialport = serialport
         self.baudrate = baudrate
@@ -38,27 +41,15 @@ class Satellite:
         self.plotting = plotting
         self.plotsize = plotsize
         self.r = 0
+        self.hyperledge_add = hyperledge_add
+        self.hyperledge_get = hyperledge_get
+        self.satID = satID
 
-        self.emulated_serial = emulated_serial
+        self.ledged = False
 
         # Voltage data of 6 channels
         self.data = [deque(list(np.zeros(self.plotsize)),maxlen=self.plotsize) for x in range(0,11)]
         self.x_time = deque([x/self.frequency for x in range(self.plotsize)],maxlen=self.plotsize)
-
-    def emulate_connection(self):
-        self.emulated_serial = True
-
-        master, slave = pty.openpty()
-        s_name = os.ttyname(slave)
-        self.arduino = serial.Serial(s_name)
-        self.emulated_master = master
-        print("Emulated connection established")
-
-        data = b'ffff0494ffffFE70ffff3AC0ffffFF21ffffFF9BffffFF4Affff0005ffff0017ffff6844'
-        print(int('0494', 16))
-
-        self.arduino.write(data)
-
 
     def establish_connection(self):
         try:
@@ -110,7 +101,6 @@ class Satellite:
         '''
         print("Starting sync: {}".format(A))
         sb1_index = A.index(self.syncbyte1)
-        # B = struct.unpack('{}B'.format(sb1_index),self.arduino.read(sb1_index))
         B = self.arduino.read(sb1_index)
         A = A[sb1_index:] + B
         print("Synchronization is done: {}".format(A))
@@ -118,19 +108,13 @@ class Satellite:
 
     def read_pack(self):
 
-        if self.emulated_serial:
-            A = struct.unpack('{}B'.format(self.packsize),os.read(self.emulated_master,self.packsize))
-            print("Data uint8 {}".format(A))
-            A = self.typecast_swap_float(A[1:3])
-            return(A)
-
         A = self.arduino.read(self.packsize)
 
         # Checks if what we just read is valid data, if desync resolve it
         while True:
-            if self.syncbyte1 in A and A[-1] != 70:
+            if self.syncbyte1 in A:
                 break
-            A = self.arduino.read(8)
+            self.arduino.read(8)
             A = self.arduino.read(self.packsize)
 
         if A[0:8] != self.syncbyte1 or A[-1] == 70:
@@ -144,7 +128,7 @@ class Satellite:
 
     def read_packs(self, num = None):
         if num == None:
-            num = self.numread
+            num = self.numreadпше
 
         if self.arduino.inWaiting() >= num * self.packsize:
             for i in range(self.numread):
@@ -152,8 +136,12 @@ class Satellite:
                 mult = 2**14
                 Data = [int(A[i:i + 4],16) for i in range(0, len(A) - 4, 4)]
                 _, _, ax, ay, az, gx, gy, gz, t, h, l, rb, r = Data
-                print(A)
-                print("Temp is {}, byte: {}".format(t,A[32:36]))
+
+                # print("Data from satellite: {}".format(A))
+
+                ax = self.convert_s16(ax)
+                ay = self.convert_s16(ay)
+                az = self.convert_s16(az)
 
                 gx = self.convert_s16(gx)
                 gy = self.convert_s16(gy)
@@ -169,12 +157,21 @@ class Satellite:
                 self.data[7].append(h) # Humidity
                 self.data[8].append(l) # Light
                 self.data[9].append(rb) # RAD_BOOL
-                print(rb)
+
                 if (rb != 0):
                     self.r = r
                 self.data[10].append(self.r)  # Radiation
 
+                self.ledged = False
+
         return self.data
+
+
+    def acc_to_file(self):
+        with open("data.txt", 'w') as f:
+            f.write(str(self.data[0][-1])+"\n")
+            f.write(str(self.data[1][-1])+"\n")
+            f.write(str(self.data[2][-1]))
 
     def realtime_emg(self):
         '''
@@ -326,10 +323,7 @@ class Satellite:
             return False
 
     def __enter__(self):
-        if self.emulated_serial:
-            self.emulate_connection()
-        else:
-            self.establish_connection()
+        self.establish_connection()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -340,6 +334,50 @@ class Satellite:
 
     def inwaiting(self):
         return int(np.round(self.arduino.inWaiting()/self.packsize))
+
+    @staticmethod
+    def send_to_ledger(url,data):
+
+        print("Sending data to IBM Hyperledger...")
+        request = Request(url, urlencode(data).encode(),
+                          headers={"x-api-key": "justAnotherApiKey"})
+
+        response = urlopen(request).read().decode(encoding="UTF8")
+        hash = json.loads(response)["transactionId"]
+        print("Transaction completed, transactionId: {}".format(hash))
+
+    def ledger_AddSatData(self):
+
+        if self.ledged:
+            return False
+
+        satID = str(self.satID)
+        provider = "0001"
+        time_stamp = time.time()
+        radiation = str(self.data[10][-1])
+        gyro = "{} {} {}".format(self.data[3][-1],self.data[4][-1],self.data[5][-1])
+        acc = "{} {} {}".format(self.data[0][-1],self.data[0][-1],self.data[0][-1])
+        light = str(self.data[8][-1])
+        temp = str(self.data[6][-1])
+        humidity = str(self.data[7][-1])
+
+        satData = {
+            "$class": "team.student.dreamers.AddSatData",
+            "provider": provider,
+            "dataID": "",
+            "satID": satID,
+            "time_stamp": time_stamp,
+            "radiation": radiation,
+            "gyro": gyro,
+            "acc": acc,
+            "light": light,
+            "temp": temp,
+            "humidity": humidity
+          }
+        satData["dataID"] = str(hashlib.sha1(str(satData).encode(encoding="UTF8")).hexdigest())
+
+        self.ledged = True
+        self.send_to_ledger(self.hyperledge_add, satData)
 
 
 if __name__ == '__main__':

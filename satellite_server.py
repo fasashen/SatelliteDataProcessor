@@ -1,6 +1,7 @@
 import atexit
 import json
 from time import gmtime, strftime
+import logging
 
 import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -45,16 +46,33 @@ def get_data():
 # Updates EMG data in realtime
 def data_realtime_update():
     satellite.read_packs()
+    global ledge_counter
+    ledge_counter += 1
+    if ledge_counter > 50:
+        ledge_counter = 0
+        satellite.ledger_AddSatData()
+
+    satellite.acc_to_file()
 
 
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+class NoRunningFilter(logging.Filter):
+    def filter(self, record):
+        return not record.msg.startswith('Execution of job')
+
+my_filter = NoRunningFilter()
+logging.getLogger("apscheduler.scheduler").addFilter(my_filter)
+
 scheduler.add_job(
     func=data_realtime_update,
-    trigger=IntervalTrigger(seconds=0.5),
+    trigger=IntervalTrigger(seconds=0.1),
     replace_existing=True)
 # Shut down the scheduler when exiting the app
 atexit.register(lambda: scheduler.shutdown())
+
+ledge_counter = 0
 
 if __name__ == '__main__':
     try:
