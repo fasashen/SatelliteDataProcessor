@@ -26,7 +26,7 @@ class Satellite:
                  plotsize=30,
                  hyperledge_add='http://10.1.49.50:3000/api/AddSatData',
                  hyperledge_get='http://10.1.49.50:3000/queries/getAssetsByTimeAndSatID',
-                 satID=1):
+                 satID="0001"):
 
         self.serialport = serialport
         self.baudrate = baudrate
