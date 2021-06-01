@@ -211,7 +211,7 @@ Twisted==18.7.0
 tzlocal==1.5.1
 unicodecsv==0.14.1
 update==0.0.1
-urllib3==1.23
+urllib3==1.26.5
 varlink==27.1.1
 wcwidth==0.1.7
 webencodings==0.5.1
